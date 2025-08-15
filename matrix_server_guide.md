@@ -38,7 +38,7 @@ Matrix — это открытый стандарт для децентрали�
 | RAM | 2 ГБ | 4 ГБ |
 | CPU | 1 vCPU | 2 vCPU |
 | Диск | 20 ГБ SSD | 50 ГБ SSD |
-| ОС | Ubuntu 22.04+ | Ubuntu 24.04 LTS |
+| ОС | Ubuntu 20.04+ | Ubuntu 22.04 LTS |
 
 ### Что понадобится
 
@@ -224,13 +224,24 @@ networks:
 
 ### 2. Генерация конфигурации Synapse
 
+**Важно:** С версии Synapse 1.99+ используется новый репозиторий Element.
+
 ```bash
 # Замените your.domain.com на ваш домен
+sudo docker run -it --rm \
+  -v ./synapse:/data \
+  -e SYNAPSE_SERVER_NAME=your.domain.com \
+  -e SYNAPSE_REPORT_STATS=yes \
+  matrixdotorg/synapse:latest generate
+
+# Альтернативная команда через docker-compose
 sudo docker-compose run --rm synapse generate \
   --server-name your.domain.com \
   --report-stats=yes \
   --config-path /data/homeserver.yaml
 ```
+
+**Примечание:** Начиная с версии 1.99, Synapse поддерживается компанией Element под новой лицензией. Функциональность остается той же, но репозиторий изменился с `github.com/matrix-org/synapse` на `github.com/element-hq/synapse`.
 
 ### 3. Настройка Synapse
 
@@ -412,9 +423,65 @@ https://federationtester.matrix.org/#your.domain.com
 
 ---
 
-## Создание пользователей
+## Управление регистрацией и пользователями
 
-### Создание администратора
+### Настройка политики регистрации
+
+#### Закрытая регистрация (рекомендуется)
+
+По умолчанию регистрация закрыта. В файле `synapse/homeserver.yaml`:
+
+```yaml
+# Регистрация закрыта
+enable_registration: false
+enable_registration_without_verification: false
+
+# Дополнительная защита
+registration_requires_token: true
+```
+
+#### Открытая регистрация
+
+**⚠️ ОСТОРОЖНО:** Открытая регистрация может привести к спаму и злоупотреблениям!
+
+```yaml
+# Открытая регистрация
+enable_registration: true
+enable_registration_without_verification: true
+
+# Обязательно добавьте лимиты
+registration_shared_secret: "RANDOM_SECRET_STRING"
+
+# Лимиты для предотвращения спама
+rc_registration:
+  per_second: 0.1  # Максимум 1 регистрация в 10 секунд
+  burst_count: 3   # Максимум 3 регистрации подряд
+
+# Требование email для регистрации (рекомендуется)
+registrations_require_3pid:
+  - email
+
+email:
+  smtp_host: smtp.gmail.com
+  smtp_port: 587
+  smtp_user: your-email@gmail.com
+  smtp_pass: your-app-password
+  force_tls: true
+  notif_from: "Matrix Server <your-email@gmail.com>"
+```
+
+#### Регистрация только по токенам
+
+Компромиссный вариант - разрешить регистрацию только по специальным токенам:
+
+```yaml
+enable_registration: true
+registration_requires_token: true
+```
+
+### Создание пользователей
+
+#### Создание администратора
 
 ```bash
 sudo docker-compose exec synapse register_new_matrix_user \
@@ -425,7 +492,7 @@ sudo docker-compose exec synapse register_new_matrix_user \
   http://localhost:8008
 ```
 
-### Создание обычного пользователя
+#### Создание обычного пользователя (закрытая регистрация)
 
 ```bash
 sudo docker-compose exec synapse register_new_matrix_user \
@@ -433,6 +500,263 @@ sudo docker-compose exec synapse register_new_matrix_user \
   -p PASSWORD \
   -c /data/homeserver.yaml \
   http://localhost:8008
+```
+
+#### Создание токенов для регистрации
+
+**Современный способ через Admin API:**
+
+```bash
+# Получите admin access token через Element клиент:
+# Settings → Help & About → Advanced → Access Token
+
+# Создание одноразового токена
+curl -X POST \
+  "https://your.domain.com/_synapse/admin/v1/registration_tokens" \
+  -H "Authorization: Bearer YOUR_ADMIN_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "uses_allowed": 1,
+    "length": 16
+  }'
+
+# Создание токена с ограничениями по времени и использованию
+curl -X POST \
+  "https://your.domain.com/_synapse/admin/v1/registration_tokens" \
+  -H "Authorization: Bearer YOUR_ADMIN_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "uses_allowed": 5,
+    "expiry_time": 1735689599000,
+    "length": 20
+  }'
+
+# Список всех токенов
+curl -X GET \
+  "https://your.domain.com/_synapse/admin/v1/registration_tokens" \
+  -H "Authorization: Bearer YOUR_ADMIN_ACCESS_TOKEN"
+
+# Удаление токена
+curl -X DELETE \
+  "https://your.domain.com/_synapse/admin/v1/registration_tokens/TOKEN_HERE" \
+  -H "Authorization: Bearer YOUR_ADMIN_ACCESS_TOKEN"
+```
+
+**Альтернативный способ (устаревший):**
+
+```bash
+# Для старых версий Synapse
+sudo docker-compose exec synapse \
+  register_new_matrix_user \
+  -c /data/homeserver.yaml \
+  http://localhost:8008
+```
+
+### Управление пользователями через Admin API
+
+#### Активация Admin API
+
+Добавьте в `homeserver.yaml`:
+
+```yaml
+# Включаем Admin API
+enable_registration: false
+admin_contact: 'mailto:admin@your.domain.com'
+
+# Настройки для администраторов
+server_notices:
+  system_mxid_localpart: notices
+  system_mxid_display_name: "Server Notices"
+  room_name: "Server Notices"
+```
+
+#### Полезные команды Admin API
+
+**Получение admin access token:**
+1. Войдите в Element как администратор
+2. Settings → Help & About → Advanced → Access Token
+3. Скопируйте токен (начинается с `syt_`)
+
+```bash
+# Переменная для удобства
+ADMIN_TOKEN="YOUR_ADMIN_ACCESS_TOKEN_HERE"
+BASE_URL="https://your.domain.com"
+
+# Список всех пользователей
+curl -X GET \
+  "$BASE_URL/_synapse/admin/v2/users" \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+
+# Информация о конкретном пользователе
+curl -X GET \
+  "$BASE_URL/_synapse/admin/v2/users/@username:your.domain.com" \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+
+# Деактивация пользователя
+curl -X POST \
+  "$BASE_URL/_synapse/admin/v1/deactivate/@username:your.domain.com" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"erase": false}'
+
+# Получение статистики сервера
+curl -X GET \
+  "$BASE_URL/_synapse/admin/v1/statistics/users/media" \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+
+# Список комнат пользователя
+curl -X GET \
+  "$BASE_URL/_synapse/admin/v1/users/@username:your.domain.com/joined_rooms" \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+
+# Принудительное обновление статистики комнаты
+curl -X POST \
+  "$BASE_URL/_synapse/admin/v1/rooms/!roomid:your.domain.com/forward_extremities" \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+### Переключение режимов регистрации
+
+#### Скрипт для быстрого переключения
+
+Создайте файл `toggle_registration.sh`:
+
+```bash
+#!/bin/bash
+
+CONFIG_FILE="/opt/matrix/synapse/homeserver.yaml"
+COMPOSE_DIR="/opt/matrix"
+
+echo "Текущее состояние регистрации:"
+grep "enable_registration:" $CONFIG_FILE
+
+echo ""
+echo "1) Закрыть регистрацию"
+echo "2) Открыть регистрацию"
+echo "3) Регистрация только по токенам"
+read -p "Выберите опцию (1-3): " choice
+
+case $choice in
+  1)
+    sed -i 's/enable_registration: true/enable_registration: false/' $CONFIG_FILE
+    sed -i 's/registration_requires_token: false/registration_requires_token: true/' $CONFIG_FILE
+    echo "Регистрация закрыта"
+    ;;
+  2)
+    sed -i 's/enable_registration: false/enable_registration: true/' $CONFIG_FILE
+    sed -i 's/registration_requires_token: true/registration_requires_token: false/' $CONFIG_FILE
+    echo "⚠️ ВНИМАНИЕ: Регистрация открыта для всех!"
+    ;;
+  3)
+    sed -i 's/enable_registration: false/enable_registration: true/' $CONFIG_FILE
+    sed -i 's/registration_requires_token: false/registration_requires_token: true/' $CONFIG_FILE
+    echo "Регистрация доступна только по токенам"
+    ;;
+  *)
+    echo "Неверный выбор"
+    exit 1
+    ;;
+esac
+
+echo "Перезапускаем Synapse..."
+cd $COMPOSE_DIR
+sudo docker-compose restart synapse
+
+echo "Готово! Новые настройки применены."
+```
+
+Сделайте скрипт исполняемым:
+
+```bash
+chmod +x toggle_registration.sh
+```
+
+### Мониторинг регистраций
+
+#### Просмотр новых регистраций
+
+```bash
+# Последние регистрации
+sudo docker-compose exec db psql -U synapse -c "
+  SELECT name, creation_ts, admin, deactivated 
+  FROM users 
+  WHERE user_type IS NULL 
+  ORDER BY creation_ts DESC 
+  LIMIT 10;"
+
+# Статистика по дням
+sudo docker-compose exec db psql -U synapse -c "
+  SELECT 
+    DATE(to_timestamp(creation_ts/1000)) as date,
+    COUNT(*) as registrations
+  FROM users 
+  WHERE user_type IS NULL 
+  GROUP BY DATE(to_timestamp(creation_ts/1000))
+  ORDER BY date DESC 
+  LIMIT 30;"
+```
+
+#### Настройка уведомлений о регистрациях
+
+Добавьте в `homeserver.yaml`:
+
+```yaml
+# Уведомления администратору
+server_notices:
+  system_mxid_localpart: notices
+  system_mxid_display_name: "Server Notices"
+  room_name: "Server Notices"
+
+# Логирование регистраций
+loggers:
+  synapse.handlers.register:
+    level: INFO
+```
+
+### Защита от спама
+
+#### Настройки rate limiting
+
+```yaml
+# Лимиты для регистрации
+rc_registration:
+  per_second: 0.17  # ~1 регистрация в 6 секунд
+  burst_count: 3
+
+# Лимиты для сообщений
+rc_message:
+  per_second: 0.2
+  burst_count: 10
+
+# Лимиты для входа
+rc_login:
+  address:
+    per_second: 0.17
+    burst_count: 3
+  account:
+    per_second: 0.17
+    burst_count: 3
+  failed_attempts:
+    per_second: 0.17
+    burst_count: 3
+
+# Дополнительная защита
+require_auth_for_profile_requests: true
+limit_profile_requests_to_users_who_share_rooms: true
+```
+
+#### Blacklist доменов
+
+```yaml
+# Блокировка проблемных доменов
+federation_blacklist:
+  - "bad-server.com"
+  - "spam-server.org"
+
+# Список разрешенных доменов (whitelist)
+# federation_whitelist:
+#   - "matrix.org"
+#   - "trusted-server.com"
 ```
 
 ---
@@ -562,7 +886,11 @@ sudo docker-compose exec db psql -U synapse -c "
 ### Полезные ссылки
 
 - [Официальная документация Matrix](https://matrix.org/docs/)
-- [Synapse Admin API](https://matrix-org.github.io/synapse/latest/admin_api/)
+- [Synapse документация (новый репозиторий Element)](https://element-hq.github.io/synapse/latest/)
+- [Synapse документация (Matrix.org - до версии 1.99)](https://matrix-org.github.io/synapse/latest/)
+- [Synapse Admin API](https://element-hq.github.io/synapse/latest/usage/administration/admin_api/)
 - [Element клиент](https://element.io/)
 - [Список публичных серверов](https://joinmatrix.org/servers/)
+- [Matrix Specification](https://spec.matrix.org/)
+- [Coturn документация](https://github.com/coturn/coturn)
 
